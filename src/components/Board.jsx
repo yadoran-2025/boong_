@@ -825,24 +825,7 @@ const Board = ({ schedules, date, onScheduleCreate, onScheduleUpdate, onSchedule
                                                 left: `${schedule.leftPercent}%`,
                                                 width: `${schedule.widthPercent}%`,
                                             }}
-                                        >
-                                            {isLongPressed && (
-                                                <div className="absolute inset-0 bg-black/60 z-50 flex items-center justify-center rounded transition-opacity animate-in fade-in"
-                                                    onClick={(e) => e.stopPropagation()}
-                                                >
-                                                    <button
-                                                        className="bg-red-500 text-white text-xs px-2 py-1 rounded shadow-lg active:scale-95"
-                                                        onClick={(e) => {
-                                                            e.stopPropagation();
-                                                            if (onScheduleDelete) onScheduleDelete(schedule);
-                                                            setLongPressTarget(null);
-                                                        }}
-                                                    >
-                                                        Delete
-                                                    </button>
-                                                </div>
-                                            )}
-                                        </ScheduleBlock>
+                                        />
                                     );
                                 })}
                             </div>
