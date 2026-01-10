@@ -115,7 +115,7 @@ const resolveCollisions = (events) => {
     return resolved;
 };
 
-const Board = ({ schedules, date, onScheduleCreate, onScheduleUpdate, onScheduleDelete, people: propPeople }) => {
+const Board = ({ schedules, date, onScheduleCreate, onScheduleUpdate, onScheduleDelete, onScheduleEdit, people: propPeople }) => {
     const daySchedules = useMemo(() => schedules.filter(s => s.date === date), [schedules, date]);
     const people = useMemo(() => {
         // Use propPeople if provided, otherwise fallback to schedules
@@ -421,32 +421,18 @@ const Board = ({ schedules, date, onScheduleCreate, onScheduleUpdate, onSchedule
             longPressTimerRef.current = setTimeout(() => {
                 longPressTimerRef.current = null; // IMPORTANT: Clear ref so we know timer finished
 
-                // IMPORTANT: When timer fires, we check if we actually moved too far is handled by move
-                // But if we are here, we are good to go.
-
+                // Long Press -> DELETE Mode (Toggle)
+                // NO Vibration
                 isLongPressActiveRef.current = true;
-                if (navigator.vibrate) navigator.vibrate(50);
 
-                // 1. Move Mode ONLY (Do NOT show Delete Button)
-                setLongPressTarget(null);
+                // Show Delete Button
+                setLongPressTarget(schedule._id);
 
-                // 2. Start Moving State (Pre-calculate for smoother transition if they drag)
-                // Note: Actual movement happens in touchMove after this flag is set
-
-                const containerRect = containerRef.current.getBoundingClientRect();
-                const scrollTop = containerRef.current.scrollTop;
-                const mouseGridY = touch.clientY - containerRect.top + scrollTop - HEADER_HEIGHT;
-                const blockStartY = (schedule.startMinutes - START_MINUTES_GLOBAL) * PIXELS_PER_MINUTE;
-                const offset = mouseGridY - blockStartY;
-
-                setMoveState({
-                    isMoving: true,
-                    original: schedule,
-                    targetPerson: schedule.name,
-                    targetColIndex: people.indexOf(schedule.name),
-                    snappedY: blockStartY,
-                    dragOffsetY: offset
-                });
+                // NOTE: We do NOT trigger Move State here anymore.
+                // Drag-to-Move is disabled on mobile for now based on user request "Delete strange vibrations" and "Tap to Edit".
+                // If they want to move, they might use the Edit Modal? 
+                // Or maybe we treat "Edit Mode" as movable? 
+                // For now, strictly following: Long Press = Delete.
 
             }, 500); // 500ms Strict Timer
         }
@@ -569,9 +555,16 @@ const Board = ({ schedules, date, onScheduleCreate, onScheduleUpdate, onSchedule
             // Prevent ghost click (which would trigger background click and deselect)
             if (e && e.cancelable) e.preventDefault();
 
-            // It's a TAP!
+            // It's a TAP! -> EDIT (Open Modal)
             const targetId = activeTouchBlockIdRef.current;
-            setLongPressTarget(prev => prev === targetId ? null : targetId);
+            const targetSchedule = schedules.find(s => s._id === targetId);
+
+            // Clear any delete button just in case
+            setLongPressTarget(null);
+
+            if (targetSchedule && onScheduleEdit) {
+                onScheduleEdit(targetSchedule);
+            }
         }
 
         // Clear Timers

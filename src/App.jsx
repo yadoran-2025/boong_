@@ -99,12 +99,11 @@ function App() {
           </h1>
           <p className="text-white/40 mt-1">Friends' Timeline</p>
           <p className="text-white/30 text-xs mt-2 md:hidden">
-            * 빈 공간을 빠르게 두 번 탭하여 새 일정 만들기<br />
-            * 일정을 꾹 누르고 드래그하여 시간 수정<br />
-            * 일정을 짧게 탭하여 삭제
+            * 일정을 짧게 탭하여 수정<br />
+            * 빈칸을 더블탭하여 일정 추가<br />
+            * 일정을 꾹 누르고 드래그하여 삭제
           </p>
         </div>
-
 
       </header>
 
@@ -140,6 +139,11 @@ function App() {
           people={people}
           date={date}
           onScheduleCreate={handleScheduleCreate}
+          onScheduleEdit={(schedule) => {
+            // Open Modal with existing data
+            setModalData(schedule);
+            setIsModalOpen(true);
+          }}
           onScheduleUpdate={(original, updated) => {
             // Optimistic Update using _id
             setSchedules(prev => prev.map(s => {
