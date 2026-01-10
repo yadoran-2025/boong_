@@ -38,6 +38,7 @@ const normalizeData = (rawData) => {
     const [endH, endM] = row.end.split(':').map(Number);
 
     return {
+      _id: Date.now() + Math.random().toString(36).substr(2, 9), // Synthetic ID for UI tracking
       name: row.name.trim(),
       date: row.date.trim(),
       start: row.start.trim(),
