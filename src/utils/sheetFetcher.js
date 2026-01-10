@@ -10,29 +10,8 @@ const MOCK_DATA = [
   { name: 'Friend C', date: '1.14', start: '09:00', end: '11:00', reason: 'Gym' },
 ];
 
-export const fetchScheduleData = async (sheetUrl) => {
-  if (!sheetUrl) {
-    console.warn('No sheet URL provided, using mock data');
-    // Simulate network delay
-    await new Promise(resolve => setTimeout(resolve, 500));
-    return normalizeData(MOCK_DATA);
-  }
-
-  return new Promise((resolve, reject) => {
-    Papa.parse(sheetUrl, {
-      download: true,
-      header: true,
-      complete: (results) => {
-        resolve(normalizeData(results.data));
-      },
-      error: (error) => {
-        reject(error);
-      },
-    });
-  });
-};
-
-const normalizeData = (rawData) => {
+// Helper to get valid schedules
+const getSchedules = (rawData) => {
   return rawData.filter(row => row.name && row.date && row.start && row.end).map(row => {
     const [startH, startM] = row.start.split(':').map(Number);
     const [endH, endM] = row.end.split(':').map(Number);
@@ -47,5 +26,44 @@ const normalizeData = (rawData) => {
       startMinutes: startH * 60 + startM,
       endMinutes: endH * 60 + endM,
     };
+  });
+};
+
+// Helper to get all unique users
+const getUsers = (rawData) => {
+  const names = new Set();
+  rawData.forEach(row => {
+    if (row.name && row.name.trim()) {
+      names.add(row.name.trim());
+    }
+  });
+  return Array.from(names).sort();
+};
+
+export const fetchScheduleData = async (sheetUrl) => {
+  if (!sheetUrl) {
+    console.warn('No sheet URL provided, using mock data');
+    // Simulate network delay
+    await new Promise(resolve => setTimeout(resolve, 500));
+    return {
+      schedules: getSchedules(MOCK_DATA),
+      users: getUsers(MOCK_DATA)
+    };
+  }
+
+  return new Promise((resolve, reject) => {
+    Papa.parse(sheetUrl, {
+      download: true,
+      header: true,
+      complete: (results) => {
+        resolve({
+          schedules: getSchedules(results.data),
+          users: getUsers(results.data)
+        });
+      },
+      error: (error) => {
+        reject(error);
+      },
+    });
   });
 };

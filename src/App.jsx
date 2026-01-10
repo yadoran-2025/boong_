@@ -8,6 +8,7 @@ import './App.css';
 
 function App() {
   const [schedules, setSchedules] = useState([]);
+  const [people, setPeople] = useState([]); // List of all users from sheet
   const [date, setDate] = useState('1.14'); // Default date
   const [loading, setLoading] = useState(true);
 
@@ -28,8 +29,9 @@ function App() {
   const loadData = async () => {
     setLoading(true);
     try {
-      const data = await fetchScheduleData(SHEET_URL);
-      setSchedules(data);
+      const { schedules: fetchedSchedules, users: fetchedUsers } = await fetchScheduleData(SHEET_URL);
+      setSchedules(fetchedSchedules);
+      setPeople(fetchedUsers);
     } catch (error) {
       console.error("Failed to load data", error);
     } finally {
@@ -96,6 +98,11 @@ function App() {
             붕모 스케줄
           </h1>
           <p className="text-white/40 mt-1">Friends' Timeline</p>
+          <p className="text-white/30 text-xs mt-2 md:hidden">
+            * 빈 공간을 빠르게 두 번 탭하여 새 일정 만들기<br />
+            * 일정을 꾹 누르고 드래그하여 시간 수정<br />
+            * 일정을 짧게 탭하여 삭제
+          </p>
         </div>
 
 
@@ -130,6 +137,7 @@ function App() {
       ) : (
         <Board
           schedules={schedules}
+          people={people}
           date={date}
           onScheduleCreate={handleScheduleCreate}
           onScheduleUpdate={(original, updated) => {

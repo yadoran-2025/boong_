@@ -6,7 +6,8 @@ const ScheduleBlock = ({
     style,
     handlers,
     isMoving,
-    isResizing
+    isResizing,
+    children // Accept children for Delete Overlay
 }) => {
     const controls = useDragControls();
 
@@ -27,6 +28,9 @@ const ScheduleBlock = ({
             onDrag={(e, info) => handlers.onDrag(e, info, schedule)}
             onDragEnd={(e, info) => handlers.onDragEnd(e, info, schedule)}
             onContextMenu={(e) => handlers.onContextMenu(e, schedule)}
+            // Touch Handlers for Long Press
+            onTouchStart={(e) => handlers.onTouchStart && handlers.onTouchStart(e)}
+            onTouchEnd={(e) => handlers.onTouchEnd && handlers.onTouchEnd(e)}
             initial={{ opacity: 0, scale: 0.9 }}
             animate={{ opacity: (isMoving || isResizing) ? 0.3 : 1, scale: 1 }}
             className="absolute rounded flex flex-col hover:brightness-105 overflow-visible"
@@ -38,36 +42,45 @@ const ScheduleBlock = ({
                 border: border,
                 padding: '2px',
                 fontFamily: 'var(--font-soft)',
-                zIndex: (isMoving || isResizing) ? 100 : 10,
-                cursor: 'default' // Default cursor for the container
+                zIndex: (isMoving || isResizing || children) ? 100 : 10, // Higher Z if Active or Delete button shown
+                cursor: 'default', // Default cursor for the container
+                touchAction: isMoving ? 'none' : 'auto' // Prevent scroll while moving
             }}
         >
-            {/* Top Resize Handle */}
+            {children}
+
+            {/* Top Resize Handle - INSTANT SCROLL LOCK */}
             <div
                 className="absolute top-0 left-0 right-0 h-4 cursor-ns-resize hover:bg-blue-400/30 z-30"
                 onMouseDown={(e) => handlers.onResizeStart(e, 'top', schedule)}
-                style={{ marginTop: '-8px' }}
+                onTouchStart={(e) => handlers.onResizeStart(e, 'top', schedule)}
+                style={{ marginTop: '-8px', touchAction: 'none' }} // Critical: blocks browser scroll
             />
 
             {/* Content Area - DRAGGABLE */}
             <div
                 className="flex-1 w-full px-1 flex flex-col justify-center cursor-move"
                 onPointerDown={(e) => {
-                    e.stopPropagation(); // Stop parent creation handler
-                    // Start drag ONLY when clicking here
+                    // e.stopPropagation(); // Stop parent creation handler? 
+                    // Actually we want drag to start.
                     controls.start(e);
                 }}
-                onMouseDown={(e) => e.stopPropagation()} // Strict bubbling prevention
+                onMouseDown={(e) => {
+                    // For desktop mouse, we want to allow drag immediately
+                    // But we handled that via onContentMouseDown in wrapping
+                    if (handlers.onContentMouseDown) handlers.onContentMouseDown(e);
+                }}
             >
                 {schedule.reason && <div className="text-sm font-bold leading-tight mb-0.5 truncate pointer-events-none">{schedule.reason}</div>}
                 <div className="text-[11px] opacity-70 leading-tight pointer-events-none">{schedule.start}-{schedule.end}</div>
             </div>
 
-            {/* Bottom Resize Handle */}
+            {/* Bottom Resize Handle - INSTANT SCROLL LOCK */}
             <div
                 className="absolute bottom-0 left-0 right-0 h-4 cursor-ns-resize hover:bg-blue-400/30 z-30"
                 onMouseDown={(e) => handlers.onResizeStart(e, 'bottom', schedule)}
-                style={{ marginBottom: '-8px' }}
+                onTouchStart={(e) => handlers.onResizeStart(e, 'bottom', schedule)}
+                style={{ marginBottom: '-8px', touchAction: 'none' }} // Critical: blocks browser scroll
             />
         </motion.div>
     );
@@ -102,19 +115,23 @@ const resolveCollisions = (events) => {
     return resolved;
 };
 
-const Board = ({ schedules, date, onScheduleCreate, onScheduleUpdate, onScheduleDelete }) => {
+const Board = ({ schedules, date, onScheduleCreate, onScheduleUpdate, onScheduleDelete, people: propPeople }) => {
     const daySchedules = useMemo(() => schedules.filter(s => s.date === date), [schedules, date]);
     const people = useMemo(() => {
-        // Use 'schedules' (all data) instead of 'daySchedules' to ensure columns persist
-        // even on days with no events.
-        const unique = [...new Set(schedules.map(s => s.name))].sort();
+        // Use propPeople if provided, otherwise fallback to schedules
+        // Also merge them to be safe (in case some schedule has a name not in people list?)
+        // User wants "Just name floating" -> propPeople contains names from sheet even if no schedule.
+        const allNames = [...(propPeople || []), ...schedules.map(s => s.name)];
+        const unique = [...new Set(allNames)].sort();
+
         const official = "공식 일정";
         if (unique.includes(official)) {
             return [official, ...unique.filter(p => p !== official)];
         }
         return unique;
-    }, [schedules]);
+    }, [schedules, propPeople]);
 
+    // --- State ---
     const [dragState, setDragState] = useState({
         isDragging: false,
         startY: 0,
@@ -129,19 +146,30 @@ const Board = ({ schedules, date, onScheduleCreate, onScheduleUpdate, onSchedule
         targetPerson: null,
         targetColIndex: -1,
         snappedY: 0,
-        dragOffsetY: 0 // Offset from top of block
+        dragOffsetY: 0
     });
 
     const [resizeState, setResizeState] = useState({
         isResizing: false,
         original: null,
-        edge: null, // 'top' or 'bottom'
+        edge: null,
         newStartY: 0,
         newEndY: 0
     });
 
-    const containerRef = useRef(null);
+    const [longPressTarget, setLongPressTarget] = useState(null); // stores schedule ID
 
+    // --- Refs ---
+    const containerRef = useRef(null);
+    const longPressTimerRef = useRef(null);
+    const touchStartRef = useRef({ x: 0, y: 0 }); // To track distance for scroll vs long press
+    const isLongPressActiveRef = useRef(false); // Immediate flag for event handlers without re-render lag
+    const interactionTypeRef = useRef(null); // 'creation' | 'block'
+    const lastTapRef = useRef({ time: 0, x: 0, y: 0 }); // Track last tap for double-tap detection
+    const activeTouchBlockIdRef = useRef(null); // Track which block is being touched for Tap detection
+
+
+    // --- Constants ---
     const HOURS_START = 8;
     const HOURS_END = 24;
     const hours = Array.from({ length: HOURS_END - HOURS_START }, (_, i) => i + HOURS_START);
@@ -163,6 +191,8 @@ const Board = ({ schedules, date, onScheduleCreate, onScheduleUpdate, onSchedule
         );
     }
 
+    // --- Helpers ---
+
     const pixelsToTime = (y) => {
         const totalMinutes = (y / ROW_HEIGHT) * 60 + START_MINUTES_GLOBAL;
         const h = Math.floor(totalMinutes / 60);
@@ -181,12 +211,32 @@ const Board = ({ schedules, date, onScheduleCreate, onScheduleUpdate, onSchedule
         return Math.round(yPixels / SNAP_INTERVAL_PX) * SNAP_INTERVAL_PX;
     };
 
+    const getPointY = (e, info) => {
+        if (info && info.point) {
+            const containerRect = containerRef.current.getBoundingClientRect();
+            return info.point.y - containerRect.top + containerRef.current.scrollTop - HEADER_HEIGHT;
+        }
+        let clientY;
+        if (e.touches && e.touches.length > 0) {
+            clientY = e.touches[0].clientY;
+        } else if (e.changedTouches && e.changedTouches.length > 0) {
+            clientY = e.changedTouches[0].clientY;
+        } else {
+            clientY = e.clientY;
+        }
+
+        const containerRect = containerRef.current.getBoundingClientRect();
+        return clientY - containerRect.top + containerRef.current.scrollTop - HEADER_HEIGHT;
+    };
+
+    // --- Handlers ---
+
     const calculateTargetFromDrag = (info, schedule) => {
         if (!containerRef.current) return null;
 
         const containerRect = containerRef.current.getBoundingClientRect();
-        const relativeX = info.point.x - containerRect.left + containerRef.current.scrollLeft;
-        const relativeY = info.point.y - containerRect.top + containerRef.current.scrollTop;
+        const absoluteX = info.point.x;
+        const relativeX = absoluteX - containerRect.left + containerRef.current.scrollLeft;
 
         let targetColIndex = -1;
         if (relativeX > TIME_COL_WIDTH) {
@@ -194,7 +244,7 @@ const Board = ({ schedules, date, onScheduleCreate, onScheduleUpdate, onSchedule
             if (targetColIndex < 0 || targetColIndex >= people.length) targetColIndex = -1;
         }
 
-        // Apply Offset so we drag "from where we grabbed"
+        const relativeY = info.point.y - containerRect.top + containerRef.current.scrollTop;
         const gridOffsetY = relativeY - HEADER_HEIGHT - moveState.dragOffsetY;
         const snappedY = snapToGrid(gridOffsetY);
 
@@ -220,13 +270,10 @@ const Board = ({ schedules, date, onScheduleCreate, onScheduleUpdate, onSchedule
     };
 
     const handleBlockDragStart = (e, info, schedule) => {
+        setLongPressTarget(null); // Cancel any selection
         const containerRect = containerRef.current.getBoundingClientRect();
         const scrollTop = containerRef.current.scrollTop;
-
-        // Mouse Y relative to the grid top (00:00 position basically, but shifted by header)
-        // Actually relative to the scrollable content area top.
         const mouseGridY = info.point.y - containerRect.top + scrollTop - HEADER_HEIGHT;
-
         const blockStartY = (schedule.startMinutes - START_MINUTES_GLOBAL) * PIXELS_PER_MINUTE;
         const offset = mouseGridY - blockStartY;
 
@@ -244,13 +291,9 @@ const Board = ({ schedules, date, onScheduleCreate, onScheduleUpdate, onSchedule
         if (!moveState.isMoving) return;
 
         const { targetPerson, snappedY } = moveState;
-
-        // Clear state immediately
         setMoveState({ isMoving: false, original: null });
 
-        if (!targetPerson) {
-            return;
-        }
+        if (!targetPerson) return;
 
         const newStartMinutes = START_MINUTES_GLOBAL + (snappedY / PIXELS_PER_MINUTE);
         const duration = schedule.endMinutes - schedule.startMinutes;
@@ -260,7 +303,6 @@ const Board = ({ schedules, date, onScheduleCreate, onScheduleUpdate, onSchedule
         const newStartM = newStartMinutes % 60;
         const newEndH = Math.floor(newEndMinutes / 60);
         const newEndM = newEndMinutes % 60;
-
         const newStartTime = `${String(newStartH).padStart(2, '0')}:${String(newStartM).padStart(2, '0')}`;
         const newEndTime = `${String(newEndH).padStart(2, '0')}:${String(newEndM).padStart(2, '0')}`;
 
@@ -277,58 +319,272 @@ const Board = ({ schedules, date, onScheduleCreate, onScheduleUpdate, onSchedule
         }
     };
 
-    // --- Resize Handlers ---
 
-    const handleResizeStart = (e, edge, schedule) => {
-        e.preventDefault();
-        e.stopPropagation();
-        const startY = (schedule.startMinutes - START_MINUTES_GLOBAL) * PIXELS_PER_MINUTE;
-        const endY = (schedule.endMinutes - START_MINUTES_GLOBAL) * PIXELS_PER_MINUTE;
-        setResizeState({
-            isResizing: true,
-            original: schedule,
-            edge: edge,
-            newStartY: startY,
-            newEndY: endY
-        });
+    // --- Interaction Logic ---
+
+    // 1. Creation Logic
+    const handleCreationTouchStart = (e, person, colIndex) => {
+        if (e.touches && e.touches.length > 0) {
+            const touch = e.touches[0];
+            const now = Date.now();
+            const timeDiff = now - lastTapRef.current.time;
+            const dist = Math.hypot(touch.clientX - lastTapRef.current.x, touch.clientY - lastTapRef.current.y);
+
+            // Double Tap Detection (Mobile)
+            if (timeDiff < 300 && dist < 20) {
+                // Prevent Long Press logic from starting
+                if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
+
+                // Trigger Creation immediately
+                handleDoubleClick(e, person, colIndex);
+
+                // Reset to prevent triple-tap firing again
+                lastTapRef.current = { time: 0, x: 0, y: 0 };
+                return;
+            }
+
+            // Update Last Tap
+            lastTapRef.current = { time: now, x: touch.clientX, y: touch.clientY };
+
+            touchStartRef.current = { x: touch.clientX, y: touch.clientY };
+            isLongPressActiveRef.current = false;
+            interactionTypeRef.current = 'creation'; // MARK: Creation
+
+            // Start Long Press Timer for CREATION
+            longPressTimerRef.current = setTimeout(() => {
+                isLongPressActiveRef.current = true; // Now we are in "Drag Mode"
+                if (navigator.vibrate) navigator.vibrate(50); // Feedback
+
+                // Initialize Creation Drag
+                const rect = e.currentTarget.getBoundingClientRect();
+                const relativeY = touch.clientY - rect.top;
+                setDragState({ isDragging: true, startY: relativeY, currentY: relativeY, person, colIndex });
+            }, 300); // 300ms threshold for long press (Relaxed)
+        }
     };
 
-    const handleBoardMouseMove = (e) => {
+    const handleCreationMouseDown = (e, person, colIndex) => {
+        if (e.button !== 0) return; // Only left click
+        // Mouse is instant, no long press needed, but we MUST set the flag for move logic to work
+        isLongPressActiveRef.current = true;
+        interactionTypeRef.current = 'creation';
+
+        const rect = e.currentTarget.getBoundingClientRect();
+        const relativeY = e.clientY - rect.top;
+        setDragState({ isDragging: true, startY: relativeY, currentY: relativeY, person, colIndex });
+    };
+
+    const handleDoubleClick = (e, person, colIndex) => {
+        if (e.cancelable) e.preventDefault();
+        const rect = e.currentTarget.getBoundingClientRect();
+        let clientY;
+
+        // Robust ClientY Extraction
+        if (e.touches && e.touches.length > 0) {
+            clientY = e.touches[0].clientY;
+        } else if (e.nativeEvent instanceof TouchEvent && e.nativeEvent.touches && e.nativeEvent.touches.length > 0) {
+            clientY = e.nativeEvent.touches[0].clientY;
+        } else {
+            clientY = e.clientY;
+        }
+
+        if (!clientY) return;
+
+        const relativeY = clientY - rect.top;
+        const gridY = relativeY; // Already relative to col-content which is the scale
+        const snappedY = snapToGrid(gridY);
+
+        const startTime = pixelsToTime(snappedY);
+        const startMinutes = (snappedY / PIXELS_PER_MINUTE) + START_MINUTES_GLOBAL;
+        const endMinutes = startMinutes + 60; // 1 Hour Default
+
+        const endH = Math.floor(endMinutes / 60);
+        const endM = endMinutes % 60;
+        const endTime = `${String(endH).padStart(2, '0')}:${String(endM).padStart(2, '0')}`;
+
+        if (onScheduleCreate) {
+            // Slight vibration for feedback
+            if (navigator.vibrate) navigator.vibrate(50);
+            onScheduleCreate({ name: person, date, startTime, endTime });
+        }
+    };
+
+    // 2. Block Logic (Move/Resize/Delete)
+    const handleBlockTouchStart = (e, schedule) => {
+        if (e.touches && e.touches.length > 0) {
+            const touch = e.touches[0];
+            touchStartRef.current = { x: touch.clientX, y: touch.clientY };
+            isLongPressActiveRef.current = false;
+            interactionTypeRef.current = 'block'; // MARK: Block
+            activeTouchBlockIdRef.current = schedule._id; // Store for Tap detection
+
+            longPressTimerRef.current = setTimeout(() => {
+                longPressTimerRef.current = null; // IMPORTANT: Clear ref so we know timer finished
+
+                // IMPORTANT: When timer fires, we check if we actually moved too far is handled by move
+                // But if we are here, we are good to go.
+
+                isLongPressActiveRef.current = true;
+                if (navigator.vibrate) navigator.vibrate(50);
+
+                // 1. Move Mode ONLY (Do NOT show Delete Button)
+                setLongPressTarget(null);
+
+                // 2. Start Moving State (Pre-calculate for smoother transition if they drag)
+                // Note: Actual movement happens in touchMove after this flag is set
+
+                const containerRect = containerRef.current.getBoundingClientRect();
+                const scrollTop = containerRef.current.scrollTop;
+                const mouseGridY = touch.clientY - containerRect.top + scrollTop - HEADER_HEIGHT;
+                const blockStartY = (schedule.startMinutes - START_MINUTES_GLOBAL) * PIXELS_PER_MINUTE;
+                const offset = mouseGridY - blockStartY;
+
+                setMoveState({
+                    isMoving: true,
+                    original: schedule,
+                    targetPerson: schedule.name,
+                    targetColIndex: people.indexOf(schedule.name),
+                    snappedY: blockStartY,
+                    dragOffsetY: offset
+                });
+
+            }, 500); // 500ms Strict Timer
+        }
+    };
+
+    // 3. Unified Move Handler (Container)
+    const handleUnifiedMove = (e) => {
+
+        // A. If Touch: Check for scrolling vs dragging
+        if (e.touches && e.touches.length > 0) {
+            const touch = e.touches[0];
+            const moveX = Math.abs(touch.clientX - touchStartRef.current.x);
+            const moveY = Math.abs(touch.clientY - touchStartRef.current.y);
+
+            // Dynamic Threshold based on Type
+            // Creation: 15px (Loose/Easy)
+            // Block: 5px (Strict)
+            const cancelThreshold = interactionTypeRef.current === 'creation' ? 15 : 5;
+
+            // STRICT CHECK: If we moved significantly (>threshold) BEFORE timer fired, it's a scroll. Cancel timer.
+            if (!isLongPressActiveRef.current && (moveX > cancelThreshold || moveY > cancelThreshold)) {
+                if (longPressTimerRef.current) {
+                    clearTimeout(longPressTimerRef.current);
+                    longPressTimerRef.current = null;
+                }
+                // Let native scroll happen.
+                return;
+            }
+
+            // If Long Press IS Active, PREVENT SCROLLing and allow Drag logic
+            if (isLongPressActiveRef.current) {
+                if (e.cancelable) e.preventDefault();
+            }
+        }
+
+        // --- Drag Logic Implementation ---
+
         // 1. Handle Resize
         if (resizeState.isResizing) {
-            const containerRect = containerRef.current.getBoundingClientRect();
-            const scrollTop = containerRef.current.scrollTop;
+            // Resize relies on touch-action: none for the handle, so native scroll is already blocked usually.
+            // But good to prevent default here too.
+            if (e.cancelable) e.preventDefault();
 
-            // Calculate Y relative to the Grid (excluding header)
-            const absoluteY = e.clientY - containerRect.top + scrollTop - HEADER_HEIGHT;
-            const snappedY = snapToGrid(absoluteY);
-
+            const gridY = getPointY(e);
+            const snappedY = snapToGrid(gridY);
             const { original, edge } = resizeState;
             const originalStartY = (original.startMinutes - START_MINUTES_GLOBAL) * PIXELS_PER_MINUTE;
             const originalEndY = (original.endMinutes - START_MINUTES_GLOBAL) * PIXELS_PER_MINUTE;
 
             if (edge === 'top') {
-                // Dragging TOP: Modify Start, Fix End
                 const minY = 0;
                 const maxY = originalEndY - SNAP_INTERVAL_PX;
                 const clampedY = Math.max(minY, Math.min(maxY, snappedY));
                 setResizeState(prev => ({ ...prev, newStartY: clampedY, newEndY: originalEndY }));
             } else {
-                // Dragging BOTTOM: Fix Start, Modify End
                 const minY = originalStartY + SNAP_INTERVAL_PX;
                 const maxY = GRID_HEIGHT;
                 const clampedY = Math.max(minY, Math.min(maxY, snappedY));
                 setResizeState(prev => ({ ...prev, newStartY: originalStartY, newEndY: clampedY }));
             }
+            return;
         }
 
-        // 2. Handle Creation (Delegate)
-        if (dragState.isDragging) {
-            handleCreationMouseMove(e);
+        // 2. Handle Creation
+        if (dragState.isDragging && isLongPressActiveRef.current) {
+            if (e.cancelable) e.preventDefault();
+
+            const containerRect = containerRef.current.getBoundingClientRect();
+            const scrollTop = containerRef.current.scrollTop;
+            let clientY;
+            if (e.touches && e.touches.length > 0) clientY = e.touches[0].clientY;
+            else clientY = e.clientY;
+
+            const gridY = clientY - containerRect.top + scrollTop - HEADER_HEIGHT;
+            setDragState(prev => ({ ...prev, currentY: gridY }));
+        }
+
+        // 3. Handle Block Moving
+        if (moveState.isMoving && isLongPressActiveRef.current) {
+            if (e.cancelable) e.preventDefault();
+
+            const containerRect = containerRef.current.getBoundingClientRect();
+            let clientX, clientY;
+            if (e.touches && e.touches.length > 0) {
+                clientX = e.touches[0].clientX;
+                clientY = e.touches[0].clientY;
+            } else {
+                clientX = e.clientX;
+                clientY = e.clientY;
+            }
+
+            const absoluteX = clientX;
+            const relativeX = absoluteX - containerRect.left + containerRef.current.scrollLeft;
+
+            let targetColIndex = -1;
+            if (relativeX > TIME_COL_WIDTH) {
+                targetColIndex = Math.floor((relativeX - TIME_COL_WIDTH) / COL_WIDTH);
+                if (targetColIndex < 0 || targetColIndex >= people.length) targetColIndex = -1;
+            }
+
+            const relativeY = clientY - containerRect.top + containerRef.current.scrollTop;
+            const gridOffsetY = relativeY - HEADER_HEIGHT - moveState.dragOffsetY;
+            const snappedY = snapToGrid(gridOffsetY);
+
+            if (snappedY >= 0 && snappedY < GRID_HEIGHT) {
+                setMoveState(prev => ({
+                    ...prev,
+                    targetPerson: targetColIndex >= 0 ? people[targetColIndex] : null,
+                    targetColIndex: targetColIndex,
+                    snappedY: snappedY
+                }));
+            }
         }
     };
 
-    const handleBoardMouseUp = () => {
+    const handleUnifiedEnd = (e) => {
+        // Detect Tap (Block Only)
+        // Check timer AND that we are NOT already moving (timer might be null if manually cleared, but let's be safe)
+        if (longPressTimerRef.current && interactionTypeRef.current === 'block' && !moveState.isMoving) {
+            // Prevent ghost click (which would trigger background click and deselect)
+            if (e && e.cancelable) e.preventDefault();
+
+            // It's a TAP!
+            const targetId = activeTouchBlockIdRef.current;
+            setLongPressTarget(prev => prev === targetId ? null : targetId);
+        }
+
+        // Clear Timers
+        if (longPressTimerRef.current) {
+            clearTimeout(longPressTimerRef.current);
+            longPressTimerRef.current = null;
+        }
+
+        // Brief delay to prevent accidental clicks after drag?
+        setTimeout(() => {
+            isLongPressActiveRef.current = false;
+        }, 50);
+
         // 1. End Resize
         if (resizeState.isResizing) {
             const { original, newStartY, newEndY, edge } = resizeState;
@@ -345,7 +601,6 @@ const Board = ({ schedules, date, onScheduleCreate, onScheduleUpdate, onSchedule
             const newStartTime = `${String(newStartH).padStart(2, '0')}:${String(newStartM).padStart(2, '0')}`;
             const newEndTime = `${String(newEndH).padStart(2, '0')}:${String(newEndM).padStart(2, '0')}`;
 
-            // Trigger update only for the changed edge
             let shouldUpdate = false;
             let finalStartTime = original.start;
             let finalEndTime = original.end;
@@ -369,46 +624,111 @@ const Board = ({ schedules, date, onScheduleCreate, onScheduleUpdate, onSchedule
 
         // 2. End Creation
         if (dragState.isDragging) {
-            handleCreationMouseUp();
+            const startY = Math.min(dragState.startY, dragState.currentY);
+            const endY = Math.max(dragState.startY, dragState.currentY);
+            const height = endY - startY;
+            if (height > 10) {
+                const startTime = pixelsToTime(startY);
+                const endTime = pixelsToTime(endY);
+                if (onScheduleCreate) onScheduleCreate({ name: dragState.person, date, startTime, endTime });
+            }
+            setDragState({ isDragging: false, startY: 0, currentY: 0, person: null, colIndex: -1 });
+        }
+
+        // 3. End Moving
+        if (moveState.isMoving) {
+            const { targetPerson, snappedY, original } = moveState;
+            setMoveState({ isMoving: false, original: null });
+
+            if (targetPerson && original) {
+                const newStartMinutes = START_MINUTES_GLOBAL + (snappedY / PIXELS_PER_MINUTE);
+                const duration = original.endMinutes - original.startMinutes;
+                const newEndMinutes = newStartMinutes + duration;
+
+                const newStartH = Math.floor(newStartMinutes / 60);
+                const newStartM = newStartMinutes % 60;
+                const newEndH = Math.floor(newEndMinutes / 60);
+                const newEndM = newEndMinutes % 60;
+
+                const newStartTime = `${String(newStartH).padStart(2, '0')}:${String(newStartM).padStart(2, '0')}`;
+                const newEndTime = `${String(newEndH).padStart(2, '0')}:${String(newEndM).padStart(2, '0')}`;
+
+                if (targetPerson !== original.name || newStartTime !== original.start) {
+                    if (onScheduleUpdate) {
+                        onScheduleUpdate(original, {
+                            ...original,
+                            name: targetPerson,
+                            date: date,
+                            startTime: newStartTime,
+                            endTime: newEndTime
+                        });
+                    }
+                }
+            }
         }
     };
 
-    const handleCreationMouseDown = (e, person, colIndex) => {
-        if (e.button !== 0) return;
-        const rect = e.currentTarget.getBoundingClientRect();
-        const relativeY = e.clientY - rect.top;
-        setDragState({ isDragging: true, startY: relativeY, currentY: relativeY, person, colIndex });
+    const handleResizeStart = (e, edge, schedule) => {
+        // For Mouse
+        if (e.nativeEvent instanceof MouseEvent) {
+            e.preventDefault();
+            e.stopPropagation();
+        }
+        // Touch is handled via touch-action usually, but we also set state here
+
+        setLongPressTarget(null);
+
+        const startY = (schedule.startMinutes - START_MINUTES_GLOBAL) * PIXELS_PER_MINUTE;
+        const endY = (schedule.endMinutes - START_MINUTES_GLOBAL) * PIXELS_PER_MINUTE;
+        setResizeState({
+            isResizing: true,
+            original: schedule,
+            edge: edge,
+            newStartY: startY,
+            newEndY: endY
+        });
     };
 
-    const handleCreationMouseMove = (e) => {
-        if (!dragState.isDragging) return;
+    const handleBlockMouseDown = (e, schedule) => {
+        if (e.type === 'touchstart') return; // Ignore touch here, handled by onTouchStart
+        e.preventDefault();
+        e.stopPropagation();
+        setLongPressTarget(null);
+
         const containerRect = containerRef.current.getBoundingClientRect();
         const scrollTop = containerRef.current.scrollTop;
-        const gridY = e.clientY - containerRect.top + scrollTop - HEADER_HEIGHT;
-        setDragState(prev => ({ ...prev, currentY: gridY }));
+        const mouseGridY = e.clientY - containerRect.top + scrollTop - HEADER_HEIGHT;
+        const blockStartY = (schedule.startMinutes - START_MINUTES_GLOBAL) * PIXELS_PER_MINUTE;
+        const offset = mouseGridY - blockStartY;
+
+        setMoveState({
+            isMoving: true,
+            original: schedule,
+            targetPerson: schedule.name,
+            targetColIndex: people.indexOf(schedule.name),
+            snappedY: blockStartY,
+            dragOffsetY: offset
+        });
     };
 
-    const handleCreationMouseUp = () => {
-        if (!dragState.isDragging) return;
-        const startY = Math.min(dragState.startY, dragState.currentY);
-        const endY = Math.max(dragState.startY, dragState.currentY);
-        const height = endY - startY;
-        if (height > 10) {
-            const startTime = pixelsToTime(startY);
-            const endTime = pixelsToTime(endY);
-            if (onScheduleCreate) onScheduleCreate({ name: dragState.person, date, startTime, endTime });
-        }
-        setDragState({ isDragging: false, startY: 0, currentY: 0, person: null, colIndex: -1 });
+    const handleBackgroundClick = () => {
+        setLongPressTarget(null);
     };
 
     return (
-        <div className="mt-8 rounded-xl border border-white/20 bg-[#111] overflow-hidden relative shadow-2xl" style={{ height: '75vh' }}>
+        <div
+            className="mt-8 rounded-xl border border-white/20 bg-[#111] overflow-hidden relative shadow-2xl"
+            style={{ height: '75vh' }}
+            onClick={handleBackgroundClick}
+        >
             <div
                 className="overflow-auto w-full h-full relative"
                 ref={containerRef}
-                onMouseMove={handleBoardMouseMove}
-                onMouseUp={handleBoardMouseUp}
-                onMouseLeave={handleBoardMouseUp}
+                onMouseMove={handleUnifiedMove}
+                onMouseUp={handleUnifiedEnd}
+                onMouseLeave={handleUnifiedEnd}
+                onTouchMove={handleUnifiedMove}
+                onTouchEnd={handleUnifiedEnd}
             >
                 <div className="grid relative" style={{
                     gridTemplateColumns: `${TIME_COL_WIDTH}px repeat(${people.length}, ${COL_WIDTH}px)`,
@@ -434,7 +754,8 @@ const Board = ({ schedules, date, onScheduleCreate, onScheduleUpdate, onSchedule
                         return (
                             <div key={`col-content-${person}`} className="relative border-r border-white/10 bg-white/5 select-none" style={{ gridColumnStart: pIndex + 2, height: GRID_HEIGHT }}
                                 onMouseDown={(e) => handleCreationMouseDown(e, person, pIndex)}
-                            // onMouseMove and onMouseUp removed (handled by container)
+                                onTouchStart={(e) => handleCreationTouchStart(e, person, pIndex)}
+                                onDoubleClick={(e) => handleDoubleClick(e, person, pIndex)}
                             >
 
                                 {hours.map((_, hIndex) => (
@@ -467,17 +788,15 @@ const Board = ({ schedules, date, onScheduleCreate, onScheduleUpdate, onSchedule
 
                                     const isMovingThis = moveState.isMoving && moveState.original._id === schedule._id;
                                     const isResizingThis = resizeState.isResizing && resizeState.original._id === schedule._id;
+                                    const isLongPressed = longPressTarget === schedule._id;
 
                                     let topPx = startY * PIXELS_PER_MINUTE;
                                     let heightPx = (schedule.endMinutes - schedule.startMinutes) * PIXELS_PER_MINUTE;
                                     let displaySchedule = schedule;
 
                                     if (isResizingThis) {
-                                        // Override with Resize State
                                         topPx = resizeState.newStartY;
                                         heightPx = resizeState.newEndY - resizeState.newStartY;
-
-                                        // Override displayed time
                                         displaySchedule = {
                                             ...schedule,
                                             start: pixelsToTime(resizeState.newStartY),
@@ -500,15 +819,37 @@ const Board = ({ schedules, date, onScheduleCreate, onScheduleUpdate, onSchedule
                                                     e.preventDefault();
                                                     e.stopPropagation();
                                                     if (onScheduleDelete && window.confirm(`"${s.reason || '일정'}" 삭제하시겠습니까?`)) onScheduleDelete(s);
-                                                }
+                                                },
+                                                // Touch specific for long press
+                                                onTouchStart: (e) => handleBlockTouchStart(e, schedule),
+                                                onTouchEnd: handleUnifiedEnd,
+                                                // Mouse (Immediate Drag)
+                                                onContentMouseDown: (e) => handleBlockMouseDown(e, schedule)
                                             }}
                                             style={{
                                                 top: `${topPx}px`,
-                                                height: `${Math.max(10, heightPx)}px`, // Min height safety
+                                                height: `${Math.max(10, heightPx)}px`,
                                                 left: `${schedule.leftPercent}%`,
                                                 width: `${schedule.widthPercent}%`,
                                             }}
-                                        />
+                                        >
+                                            {isLongPressed && (
+                                                <div className="absolute inset-0 bg-black/60 z-50 flex items-center justify-center rounded transition-opacity animate-in fade-in"
+                                                    onClick={(e) => e.stopPropagation()}
+                                                >
+                                                    <button
+                                                        className="bg-red-500 text-white text-xs px-2 py-1 rounded shadow-lg active:scale-95"
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            if (onScheduleDelete) onScheduleDelete(schedule);
+                                                            setLongPressTarget(null);
+                                                        }}
+                                                    >
+                                                        Delete
+                                                    </button>
+                                                </div>
+                                            )}
+                                        </ScheduleBlock>
                                     );
                                 })}
                             </div>
